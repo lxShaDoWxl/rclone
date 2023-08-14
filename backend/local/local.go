@@ -440,6 +440,21 @@ func (f *Fs) newObjectWithInfo(remote string, info os.FileInfo) (fs.Object, erro
 	}
 	return o, nil
 }
+func (f *Fs) NewObjectDir(ctx context.Context, remote string) (fs.Object, error) {
+	o := f.newObject(remote)
+	err := o.lstat()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fs.ErrorObjectNotFound
+		}
+		if os.IsPermission(err) {
+			return nil, fs.ErrorPermissionDenied
+		}
+		return nil, err
+	}
+	return o, nil
+
+}
 
 // NewObject finds the Object at remote.  If it can't be found
 // it returns the error ErrorObjectNotFound.
@@ -1152,6 +1167,58 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	}
 	return in, nil
 }
+func treeDir(path, root string) []string {
+	if path == root {
+		return nil
+	}
+	result := []string{path}
+	i := len(path)
+	for i > 0 && !os.IsPathSeparator(path[i-1]) { // Skip trailing path separator.
+		i--
+	}
+	_, err := os.Stat(path[:i-1])
+	if err == nil {
+		return result
+	}
+	r := treeDir(path[:i-1], root)
+	if r != nil {
+		result = append(result, result...)
+	}
+	return result
+}
+
+func (o *Object) mkdirWithMeta(ctx context.Context, src fs.ObjectInfo, options ...fs.OpenOption) error {
+	dir := filepath.Dir(o.path)
+	if o.path == o.Fs().Root() {
+		return file.MkdirAll(dir, 0777)
+	}
+
+	fsSrc, ok := src.Fs().(fs.DirMetadataer)
+	if !ok {
+		return file.MkdirAll(dir, 0777)
+	}
+	dirs := treeDir(dir, o.Fs().Root())
+	err := file.MkdirAll(dir, 0777)
+	if err != nil {
+		return err
+	}
+	for _, s := range dirs {
+		dirObj, errFor := fsSrc.NewObjectDir(ctx, strings.TrimPrefix(s, o.Fs().Root()))
+		if errFor != nil && !errors.Is(errFor, fs.ErrorIsDir) {
+			return errFor
+		}
+		metaDir, errFor := fs.GetMetadataOptions(ctx, dirObj, options)
+		if errFor != nil {
+			return errFor
+		}
+		dstObj := o.fs.newObject(strings.TrimPrefix(s, o.Fs().Root()))
+		errFor = dstObj.writeMetadata(metaDir)
+		if errFor != nil {
+			return fmt.Errorf("failed to set metadata: %w", errFor)
+		}
+	}
+	return nil
+}
 
 // mkdirAll makes all the directories needed to store the object
 func (o *Object) mkdirAll() error {
@@ -1185,7 +1252,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		}
 	}
 
-	err = o.mkdirAll()
+	err = o.mkdirWithMeta(ctx, src, options...)
 	if err != nil {
 		return err
 	}
