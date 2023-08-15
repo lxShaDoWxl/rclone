@@ -1205,6 +1205,9 @@ func (o *Object) mkdirWithMeta(ctx context.Context, src fs.ObjectInfo, options .
 	for _, s := range dirs {
 		dirObj, errFor := fsSrc.NewObjectDir(ctx, strings.TrimPrefix(s, o.Fs().Root()))
 		if errFor != nil && !errors.Is(errFor, fs.ErrorIsDir) {
+			if errors.Is(errFor, fs.ErrorObjectNotFound) {
+				continue
+			}
 			return errFor
 		}
 		metaDir, errFor := fs.GetMetadataOptions(ctx, dirObj, options)
